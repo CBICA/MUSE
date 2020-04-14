@@ -1,0 +1,56 @@
+..
+  
+  Web:   https://www.cbica.upenn.edu/sbia/
+  Email: sbia-software at uphs.upenn.edu
+  
+  Copyright (c) 2012-2016 University of Pennsylvania. All rights reserved.
+  See http://www.cbica.upenn.edu/sbia/software/license.html or COPYING file.
+
+
+.. This file is formatted using reStructuredText (reST) and included by doc/changelog.rst !
+
+
+Changes
+=======
+
+.. _v3.0.5:
+
+Release 3.0.5 (Oct 8, 2019)
+-----------------------------
+
+- Modified python scripts from 2to3-3.6.
+
+.. _v3.0.4:
+
+Release 3.0.4 (Sep 25, 2018)
+-----------------------------
+
+- Removed BASIS
+- Changed the python version in muse-combineRoiMapsIter.py to use the default env python
+
+.. _v3.0.3:
+
+Release 3.0.3 (Sep 20, 2017)
+-----------------------------
+
+- Removed ROIs 44 and 45 from the MUSE_ROI.csv file. These ROIs had been kept in the csv as a reminder that these ROIs were present in the original atlases but were split up into several WM ROIs taken from Jakob.
+- Quoted the egrep pattern inside ''.
+
+.. _v3.0.2:
+
+Release 3.0.2 (Nov 16, 2016)
+-----------------------------
+
+- Updated the derived ROI mappings CSV
+
+Release 3.0.1 (Oct 14, 2016)
+-----------------------------
+
+- Changed the default temporary directory (to be used for storing itermediate files while processing) from $TMPDIR to $CBICA_TMPDIR
+
+.. _v3.0.0:
+
+Release 3.0.0 (Nov 3, 2015)
+-----------------------------
+
+- First public stable release.

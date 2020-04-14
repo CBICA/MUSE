@@ -1,0 +1,468 @@
+#!/bin/bash
+
+#. ${BASIS_BASH_UTILITIES} || { echo "Failed to source BASIS utilities!" 1>&2; exit 1; }
+. @LIBRARY_DIR@/muse-functions || { echo "Failed to source MUSE functions!" 1>&2; exit 1; }
+
+################################################ FUNCTIONS ################################################
+
+### Version info
+print_version()
+{
+	# Print version
+	ver="$Revision: 371 $"
+	echo -e "@PROJECT_VERSION@ ( rev${ver%$})"
+
+	exit 0
+}
+
+help()
+{
+cat <<HELP
+
+##############################################
+This script does the following:
+
+	- This script registers the -ref file to the -in file and transforms the given label/ROI map to the -in space
+	- If requested, it also generates a similarity map between the -in file and the registered -ref file
+
+USAGE :	$0 [OPTIONS]
+OPTIONS:
+
+Reqd:	-in	  < file >	absolute path to the input file to be registered
+	-ref	  < file >	absolute path to the template/reference file to be used for registration
+	-lab	  < file >	absolute path to the labeled file in the template space
+	 
+Opt:	-h         		this help page
+	-dest	  < path >	absolute path to the destination where the results are to be stored (default: same as input)
+	-Sim	  < 0/1 >	apply similarity ranking on the probabilities (default: 1, apply)	
+	-tmp	  < path >	absolute path to the temporary directory (default: \$CBICA_TMPDIR )
+	-v	  < 0/1 >	verbose output (default: 0 - no output)
+	-reg	  < float >	regularisation weight for the ANTS registration. 0 < \$reg < 1.0 (default: 0.05)
+	-int	   < int >	keep intermediate files. 
+				0 - delete all intermediate files (default)
+				1 - Keep only the important files. 
+				2 - Keep all intermediate files 
+	-V			Version Information
+
+Examples:
+	muse-ants-registrations -in /Path/To/Source/Directory/Input_n3_str.nii.gz -ref /Path/To/Template/Directory/Template10.nii.gz 
+	-lab /Path/To/Template/Directory/Template10_label.nii.gz -dest /Path/To/Destination/Directory/ 
+		Register the Template10.nii.gz image to Input_n3_str.nii.gz and apply the transformation to Template10_label.nii.gz. 
+		It'll also generate the similarity map between the input and registered reference images
+	
+	qsub muse-ants-registrations -in /Path/To/Source/Directory/Input_n3_str.nii.gz -ref /Path/To/Template/Directory/Template10.nii.gz 
+	-lab /Path/To/Template/Directory/Template10_label.nii.gz -dest /Path/To/Destination/Directory/ -scripts `dirname $0`
+		Submit the muse-ants-registrations script to SGE which will internally do the processing and store the results in the destination
+		
+ERROR: Not enough arguments!!
+##############################################
+
+
+HELP
+exit 1
+}
+
+cleanUpandExit()
+{
+	echo -e ":o:o:o:o:o Aborting Operations .... \n\n"
+	
+	if [ -d "$TMP" ]
+	then
+		rm -rfv ${TMP}
+	fi
+	
+	executionTime
+	exit 1
+}
+
+parse()
+{
+	while [ -n "$1" ]; do
+		case $1 in
+			-h) 
+				help;
+				shift 1;;
+		     	-in) 
+				input=$2;
+				
+				checkFile $input
+				temp=`FileAtt $input`				
+				InExt=`echo $temp | awk '{ print $1 }'`
+				InbName=`echo $temp | awk '{ print $2 }'`
+				InDir=`echo $temp | awk '{ print $3 }'`
+				
+				input=${InDir}/${InbName}.${InExt}
+				
+				shift 2;;
+			-ref) 
+				ref=$2;
+				
+				checkFile $ref
+				temp=`FileAtt $ref`				
+				RefExt=`echo $temp | awk '{ print $1 }'`
+				RefbName=`echo $temp | awk '{ print $2 }'`
+				RefDir=`echo $temp | awk '{ print $3 }'`
+				
+				ref=${RefDir}/${RefbName}.${RefExt}
+
+				shift 2;;
+			-lab) 
+				lab=$2;
+				
+				checkFile $lab
+				temp=`FileAtt $lab`				
+				LabExt=`echo $temp | awk '{ print $1 }'`
+				LabbName=`echo $temp | awk '{ print $2 }'`
+				LabDir=`echo $temp | awk '{ print $3 }'`
+				
+				lab=${LabDir}/${LabbName}.${LabExt}
+
+				shift 2;;
+			-dest) 
+				dest=`checkPath $2`;
+				shift 2;;
+			-tmp) 
+				tmpDirToUse=`checkPath $2`;
+				shift 2;;
+			-int) 
+				int=$2;
+				shift 2;;
+			-reg) 
+				reg=$2;
+				shift 2;;
+			-Sim) 
+				Sim=$2;
+				shift 2;;
+			-scripts) 
+				scripts=`checkPath $2`;
+				shift 2;;
+			-v) 
+				verbose=$2;
+				shift 2;;
+			-V) 
+				print_version; 
+				exit 0;;
+			-*) 
+				echo "ERROR: no such option $1";
+				help;;
+			 *) 
+				break;;
+		esac
+	done
+}
+
+convertToNifti()
+{
+	nifti1_test -zn1 $1 $1
+
+	if [ -f ${1%.img}.nii.gz ]
+	then
+		echoV "\nConverted to NIFTIGZ: $1"
+		rmV ${1} 
+		rmV ${1%.img}.hdr
+	else
+		echoV "\nConversion to NIFTIGZ failed: $1"
+	fi
+}
+
+import()
+{
+	ext=$1
+	inFile=$2
+	outFile=$3
+	
+	if [ "${ext}" == "nii.gz" ]
+	then
+		echoV "nifti1_test -n2 ${inFile} ${outFile}"
+		nifti1_test -n2 ${inFile} ${outFile}
+	elif [ "${ext}" == "nii" ]
+	then
+		echoV "nifti1_test -n2 ${inFile} ${outFile}"
+		nifti1_test -n2 ${inFile} ${outFile}
+	elif [ "${ext}" == "hdr" ]
+	then
+		echoV "nifti1_test -n2 ${inFile%.hdr}.img ${outFile}"
+		nifti1_test -n2 ${inFile%.hdr}.img ${outFile}
+	elif [ "${ext}" == "img" ]
+	then
+		echoV "nifti1_test -n2 ${inFile} ${outFile}"
+		nifti1_test -n2 ${inFile} ${outFile}
+	fi	
+}
+
+################################################ END OF FUNCTIONS ################################################
+
+################################################ MAIN BODY ################################################
+
+### Making sure the POSIXLY_CORRECT variable is unset as it causes bash to misbehave
+if [ ${POSIXLY_CORRECT} ]
+then
+	unset  POSIXLY_CORRECT
+fi
+
+### Checking for the number of arguments
+if [ $# -lt 1 ]; then
+	help
+fi
+
+### Checking if the first argument is -V
+if [ $1 == "-V" ]
+then
+	print_version;
+fi
+
+### Timestamps
+startTime=`date +%F-%H:%M:%S`
+startTimeStamp=`date +%s`
+
+echo -e "\nRunning commands on		: `hostname`"
+echo -e "Start time			: ${startTime}\n"
+
+### Check if all dependenices are satisfied
+#checkDependency	nifti1_test
+#checkDependency dramms
+
+### Default parameters
+scripts=@LIBRARY_DIR@/
+int=0
+verbose=0
+Sim=1
+reg=0.05
+FSLOUTPUTTYPE=NIFTI_GZ; export $FSLOUTPUTTYPE
+
+
+### Specifying the trap signal
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGHUP signal'" SIGHUP 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGINT signal'" SIGINT 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGTERM signal'" SIGTERM 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGKILL signal'" SIGKILL
+
+### Reading the arguments
+echo -e "\nParsing arguments		: $*"
+parse $*
+
+### Checking parameter validity
+
+# Checking if required options are provided
+if [ -z "$input" ] || [ -z "$ref" ] || [ -z "$lab" ]
+then
+	echo -e "\nERROR: Required options not provided!!!"
+	exit 1
+fi
+
+# Checking if destination was provided, if not, same as input file
+if [ -z "$dest" ]
+then
+	dest=`dirname $input`
+fi
+
+### Forming FileNames
+PID=$$
+
+createTempDir muse-ants-registrations $PID
+echoV "\n----->	Temporary local directory created at $TMP ..." 1
+
+
+# Input
+TMPin=${TMP}${InbName}.hdr
+TMPref=${TMP}${InbName}-${RefbName}.hdr
+TMPlab=${TMP}${InbName}-${LabbName}.hdr
+
+# Output
+refInSpace=${TMP}${InbName}-${RefbName}_InSpace_ants.hdr
+refLabelInSpace=${TMP}${InbName}-${RefbName}_label_InSpace_ants.hdr
+refSim=${TMP}${InbName}-${RefbName}_Sim_ants.nii.gz
+
+### Echoeing filenames
+if [ "$verbose" == "1" ]
+then
+	echo -e "\nINPUT FILES"
+	echo -e "\tInput Image			: ${input}"
+	echo -e "\tReference Image			: ${ref}"
+	echo -e "\tReference Label Image		: ${lab}"
+
+	echo -e "\nOUTPUT FILES"
+	echo -e "\tDef. Registered Label		: ${dest}${RefbName}_label_InSpace_ants.nii.gz"
+	if [ "$Sim" == "1" ]
+	then
+		echo -e "\tImage Similarity Map		: ${dest}${RefbName}_Sim_ants.nii.gz"
+	fi
+
+	echo -e "\nPARAMETERS"
+	echo -e "\tRetain intermediate files	: `if [ "$int" == "0" ]; then echo "NO"; else echo "YES"; fi`"
+	echo -e "\tTemporary Local Directory	: $TMP"
+	echo -e "\tRegularization Weight		: $reg"
+fi
+
+### Importing data to the temporary directory
+echoV "----->	Importing required files to the temporary local directory ..." 1
+
+import ${InExt} ${input} ${TMPin%.hdr}
+import ${RefExt} ${ref} ${TMPref%.hdr}
+import ${LabExt} ${lab} ${TMPlab%.hdr}
+
+### Deformable registration from reference image to input image
+echoV "----->	Performing Deformable Registration between Input and Reference Images ...\n" 1
+
+echoV "\n-->  ANTS \n
+	 3 \n
+	 -m PR[${TMPin},${TMPref},1,2] \n
+	 -i 10x50x50x10 \n
+	 -o ${refInSpace} \n
+	 -t SyN[${reg}] \n
+	 -r Gauss[2,0] \n
+	 -v;\n"
+
+if [ "$verbose" == "1" ]
+then
+	ANTS \
+	 3 \
+	 -m PR[${TMPin},${TMPref},1,2] \
+	 -i 10x50x50x10 \
+	 -o ${refInSpace} \
+	 -t SyN[${reg}] \
+	 -r Gauss[2,0] \
+	 -v;	 
+else
+	ANTS \
+	 3 \
+	 -m PR[${TMPin},${TMPref},1,2] \
+	 -i 10x50x50x10 \
+	 -o ${refInSpace} \
+	 -t SyN[${reg}] \
+	 -r Gauss[2,0];
+fi
+
+checkExitCode $? "\nERROR: Deformable Registration failed!!!"
+
+### Warping the template image to input space
+echoV "----->	Warping the Reference Image to the Input Image ...\n" 1
+
+echoV "\n-->  WarpImageMultiTransform \n
+	 3 \n
+	 ${TMPref} \n
+	 ${refInSpace} \n
+	 -R ${TMPin} \n
+	 ${refInSpace%.hdr}Warp.hdr \n
+	 ${refInSpace%.hdr}Affine.txt;\n"
+
+if [ "$verbose" == "1" ]
+then
+	WarpImageMultiTransform \
+	 3 \
+	 ${TMPref} \
+	 ${refInSpace} \
+	 -R ${TMPin} \
+	 ${refInSpace%.hdr}Warp.hdr \
+	 ${refInSpace%.hdr}Affine.txt;
+else
+	WarpImageMultiTransform \
+	 3 \
+	 ${TMPref} \
+	 ${refInSpace} \
+	 -R ${TMPin} \
+	 ${refInSpace%.hdr}Warp.hdr \
+	 ${refInSpace%.hdr}Affine.txt > ${TMP}Debug.log 2>&1;
+fi
+
+checkExitCode $? "\nERROR: Warping of Reference Image to Input Image failed!!!"
+
+### Warping the template image to input space
+echoV "----->	Warping the Reference Label Image to the Input Image ...\n" 1
+
+echoV "\n-->  WarpImageMultiTransform \n
+	 3 \n
+	 ${TMPlab} \n
+	 ${refLabelInSpace} \n
+	 --use-NN \n
+	 -R ${TMPin} \n
+	 ${refInSpace%.hdr}Warp.hdr \n
+	 ${refInSpace%.hdr}Affine.txt;\n"
+
+if [ "$verbose" == "1" ]
+then
+	WarpImageMultiTransform \
+	 3 \
+	 ${TMPlab} \
+	 ${refLabelInSpace} \
+	 --use-NN \
+	 -R ${TMPin} \
+	 ${refInSpace%.hdr}Warp.hdr \
+	 ${refInSpace%.hdr}Affine.txt;
+else
+	WarpImageMultiTransform \
+	 3 \
+	 ${TMPlab} \
+	 ${refLabelInSpace} \
+	 --use-NN \
+	 -R ${TMPin} \
+	 ${refInSpace%.hdr}Warp.hdr \
+	 ${refInSpace%.hdr}Affine.txt > ${TMP}Debug.log 2>&1;
+fi
+
+checkExitCode $? "\nERROR: Warping of Reference Image to Input Image failed!!!"
+
+## Calculating Image Similarity Map
+if [ "$Sim" == "1" ]
+then
+	echoV "----->	Calculating similarity map ..." 1
+	echoV "\n--> ${scripts}muse-calculateSimilarityMap \n
+		 -a ${TMPin} \n
+		 -b ${refInSpace} \n
+		 -sim ${refSim} \n
+		 -v $verbose;"
+
+	${scripts}muse-calculateSimilarityMap \
+	 -a ${TMPin} \
+	 -b ${refInSpace} \
+	 -sim ${refSim} \
+	 -v $verbose;
+
+	checkExitCode $? "\nERROR: Similarity Map calculation failed!!!"
+fi
+
+### Removing temporary files
+if [ "$int" == 0 ] || [ "$int" == 1 ]
+then
+	echoV "----->	Removing temporary files ..." 1
+	rmV ${TMPref%.hdr}.{hdr,img}
+	rmV ${TMPlab%.hdr}.{hdr,img}
+	rmV ${TMPin%.hdr}.{hdr,img}
+	rmV ${refInSpace%.hdr}Warp.{hdr,img}
+	rmV ${refInSpace%.hdr}InverseWarp.{hdr,img}
+	rmV ${refInSpace%.hdr}Affine.txt
+
+	rmV ${TMP}Debug.log
+else
+	echoV "----->	Compressing the temporary files ..." 1
+	convertToNifti ${TMPref%.hdr}.img
+	convertToNifti ${TMPlab%.hdr}.img
+	convertToNifti ${TMPin%.hdr}.img
+	convertToNifti ${refInSpace%.hdr}Warp.img
+	convertToNifti ${refInSpace%.hdr}InverseWarp.img
+fi
+
+### Compressing the final results
+echoV "----->	Compressing the final results ..." 1
+
+convertToNifti ${refLabelInSpace%.hdr}.img
+convertToNifti ${refInSpace%.hdr}.img
+
+### Moving the results to the destination directory
+echoV "----->	Moving the results to the destination directory ..." 1
+
+mkdirV $dest
+
+if [ "$verbose" == "1" ]
+then
+	mv -v ${TMP}* ${dest}
+else
+	mv ${TMP}* ${dest}
+fi
+
+rmdirV $TMP
+
+### Execution Time 
+executionTime $startTimeStamp
+
+################################################ END ################################################

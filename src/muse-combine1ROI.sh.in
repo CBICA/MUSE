@@ -1,0 +1,789 @@
+#!/bin/sh
+
+#. ${BASIS_BASH_UTILITIES} || { echo "Failed to source BASIS utilities!" 1>&2; exit 1; }
+. @LIBRARY_DIR@/muse-functions || { echo "Failed to source MUSE functions!" 1>&2; exit 1; }
+
+################################################ FUNCTIONS ################################################
+
+### Version info
+print_version()
+{
+	# Print version
+	ver="$Revision: 371 $"
+	echo -e "@PROJECT_VERSION@ ( rev${ver%$})"
+
+	exit 0
+}
+
+help()
+{
+cat <<HELP
+
+This script does the following:
+
+
+
+##############################################
+USAGE :	$0 [OPTIONS]
+OPTIONS:
+
+Reqd:	-src	   < path >	absolute path to the directory where the input ROI masks are stored for all templates
+	-in	   < file >	absolute path to the intensity image (to be used for the intensity correction)
+	-Templates < file >	a file containing the list of templates to be considered
+	
+Opt:	-pref 	   < pattern >	prefix for the output Combined Ranked Mask (default: CombinedRankMask.nii.gz)
+	-WML	   < file >	absolute path to the WML mask (binary) which will be excluded from intensity correction (default: none)
+	-Fuzzy	   < file >	absolute path to the fuzzy segmentation results that would be added as a weight (default: none)
+	-WM	   < 0/1 >	flag indicating that this label is a WM ROI, therefore give a higher weight during intensity correction (default: 0)
+				becomes important only when used with a WML mask in -WML option
+	-method	   < int>	registration method(s) to use for registering the templates to the input image
+				1 - only use dramms (default)
+				2 - only use ants
+				3 - use both dramms as well as ants
+	-smooth	   < int >	smoothness of the similarity maps (default: 0)
+	-ranks	   < path >	absolute path to the directory where the Rank Maps are stored (default: same as -src)
+	-dest	   < path >	absolute path to the destination where the results are to be stored (default: same as -src)
+	-regs	   < int >	No. of templates to be used for registrations (default: 11)
+	-tmp	   < path >	absolute path to the temporary directory (default: \$CBICA_TMPDIR )
+	-ic	   < 0/1 >	apply intensity correction using z-scores 1-yes, 0-no (default: 0)
+	-Sim 	   < 0/1 >	has image similarity ranking been considered? 1-yes, 0-no (default: 1)
+	-v	   < 0/1 >	verbose output (default: 0 - verbose off)
+	-V			Version Information
+
+
+ERROR: Not enough arguments!!
+##############################################
+
+HELP
+exit 1
+}
+
+combine1ROI-checkFile()
+{
+	if [ ! -f $1 ]
+	then
+		echo 0
+	else
+		echo 1
+	fi
+}
+
+cleanUpandExit()
+{
+	echo -e ":o:o:o:o:o Aborting Operations .... \n\n"
+	
+	if [ -d "$TMP" ]
+	then
+		if [ "$TMP" != "$dest" ]
+		then
+			rm -rfv ${TMP}
+		else
+			for i in $(cat $Templates)
+			do
+				rmV Template${i}${float}
+				rmV Template${i}${smoothed}
+				rmV Template${i}${RankMask}
+	
+				rmV Template${i}${abs}
+				rmV Template${i}${Ranked}
+			done
+	
+			rmV ${AllJac}
+			rmV ${AllJacRanked}
+
+			if [ "$jacRank" == 0 ]
+			then
+				rmV ${jacMask}
+			fi
+			rmV ${Sum_thresh}
+			rmV ${Sum_open}
+			rmV ${Sum_filled}
+			rmV ${Sum_clustered}
+		
+			rmV ${InbName}.nii.gz	
+		fi
+	fi
+	
+	executionTime
+		
+	exit 1
+}
+
+parse()
+{
+	while [ -n "$1" ]; do
+		case $1 in
+			-h) 
+				help;
+				shift 1;;
+		     	-in) 
+				input=$2;
+				
+				checkFile $input
+				
+				temp=`FileAtt $input`				
+				InExt=`echo $temp | awk '{ print $1 }'`
+				InbName=`echo $temp | awk '{ print $2 }'`
+				InDir=`echo $temp | awk '{ print $3 }'`
+				
+				input=${InDir}/${InbName}.${InExt}
+				
+				shift 2;;
+		     	-WML) 
+				WML=$2;
+
+				checkFile $WML
+				
+				temp=`FileAtt $WML`				
+				WMLExt=`echo $temp | awk '{ print $1 }'`
+				WMLbName=`echo $temp | awk '{ print $2 }'`
+				WMLDir=`echo $temp | awk '{ print $3 }'`
+				
+				WML=${WMLDir}/${WMLbName}.${WMLExt}
+
+				shift 2;;
+		     	-Fuzzy) 
+				Fuzzy=$2;
+				shift 2;;
+			-src) 
+				src=`checkPath $2`;
+				shift 2;;
+			-dest) 
+				dest=`checkPath $2`;
+				shift 2;;
+			-tmp) 
+				tmpDirToUse=`checkPath $2`;
+				shift 2;;
+			-regs) 
+				regs=$2;
+				shift 2;;
+			-smooth) 
+				smooth=$2;
+				shift 2;;
+			-ranks) 
+				ranks=`checkPath $2`;
+				shift 2;;
+			-Templates)
+				Templates=$2;
+				shift 2;;
+			-pref) 
+				pref=$2;
+				shift 2;;
+			-ic) 
+				ic=$2;
+				shift 2;;
+			-Sim) 
+				Sim=$2;
+				shift 2;;
+			-WM) 
+				WM=$2;
+				shift 2;;
+			-BG) 
+				BG=$2;
+				shift 2;;
+			-method) 
+				method=$2;
+				shift 2;;
+			-v) 
+				verbose=$2;
+				shift 2;;
+			-V) 
+				print_version; 
+				exit 0;;
+			-*) 
+				echo "ERROR: no such option $1";
+				help;;
+			 *) 
+				break;;
+		esac
+	done
+}
+
+combine1ROI-import()
+{
+	ext=$1
+	inFile=$2
+	outFile=$3
+	
+	if [ ! -f ${outFile}.nii ]
+	then
+		if [ "${ext}" == "nii.gz" ] || [ "${ext}" == "nii" ] || [ "${ext}" == "img" ]
+		then
+			echoV "nifti1_test -zn1 ${inFile} ${outFile}"
+			nifti1_test -zn1 ${inFile} ${outFile}
+		elif [ "${ext}" == "hdr" ]
+		then
+			echoV "nifti1_test -zn1 ${inFile%.hdr}.img ${outFile}"
+			nifti1_test -zn1 ${inFile%.hdr}.img ${outFile}
+		fi	
+	fi
+}
+
+################################################ END OF FUNCTIONS ################################################
+
+################################################ MAIN BODY ################################################
+
+### Making sure the POSIXLY_CORRECT variable is unset as it causes bash to misbehave
+if [ ${POSIXLY_CORRECT} ]
+then
+	unset  POSIXLY_CORRECT
+fi
+
+### Checking for the number of arguments
+if [ $# -lt 1 ]; then
+	help
+fi
+
+### Checking if the first argument is -V
+if [ $1 == "-V" ]
+then
+	print_version;
+fi
+
+### Timestamps
+startTime=`date +%F-%H:%M:%S`
+startTimeStamp=`date +%s`
+
+echo -e "\nRunning commands on		: `hostname`"
+echo -e "Start time			: ${startTime}\n"
+
+### Check if all dependenices are satisfied
+#checkDependency	3dcalc
+#checkDependency	nifti1_test
+#checkDependency	3dMean
+
+### Default Parameters
+regs=11
+verbose=0
+pref=CombinedRankMask.nii.gz
+WML=""
+Fuzzy=""
+ranks=""
+dest=""
+ic=0
+Sim=1
+WM=0
+BG=0
+PID=$$
+method=1
+smooth=0
+
+### Specifying the trap signal
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGHUP signal'" SIGHUP 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGINT signal'" SIGINT 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGTERM signal'" SIGTERM 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGKILL signal'" SIGKILL
+
+### Reading the arguments
+echo -e "\nParsing arguments		: $*"
+parse $*
+
+# Checking if required options are provided
+if [ -z "$input" ] || [ -z "$src" ] || [ -z "$Templates" ]
+then
+	echo -e "\nERROR: Required options not provided!!!"
+	exit 1
+fi
+
+### Deciding on the registration method to use
+case $method in
+	1) methodList="dramms" ;;
+	2) methodList="ants" ;;
+	3) methodList="dramms ants" ;;
+	*) checkExitCode 1 '\nThe selection of registration method(s) is invalid! Please see --help and select appropriate arguments for the -method option'
+esac
+
+### Checking if all parameters are set
+if [ -z "$dest" ]
+then
+	dest=$src
+fi
+
+if [ -z "$ranks" ]
+then
+	ranks=$src
+fi
+
+### Scripts and environment variables
+FSLOUTPUTTYPE=NIFTI_GZ; export $FSLOUTPUTTYPE
+
+### Creating Temporary directory
+createTempDir muse-combine1ROI $PID
+echoV "\n----->	Temporary local directory created at $TMP ...\n" 1
+
+### Forming file names
+# Input Space Mask
+InSpace=_label_InSpace
+
+# Ranks
+if [ "$Sim" == "1" ]
+then
+	if [ $smooth -gt 0 ]
+	then
+		Ranked=_s${smooth}_SimRank.nii.gz
+	else
+		Ranked=_SimRank.nii.gz
+	fi
+fi
+
+### Checking if all input files present
+list=""
+if [ "$Sim" == "1" ]
+then
+	ExpectedNum=2
+else
+	ExpectedNum=1
+fi
+
+for i in $(cat $Templates)
+do
+	for registrationmethod in $methodList
+	do
+		sum=0
+
+		if [ "$Sim" == "1" ]
+		then
+			sum=$(echo "scale=0; $sum + `combine1ROI-checkFile ${ranks}${InbName}-Template${i}_Sim_${registrationmethod}${Ranked}`" | bc)
+		fi
+	
+		sum=$(echo "scale=0; $sum + `combine1ROI-checkFile ${src}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI.nii.gz`" | bc)				
+
+		if [ $sum -eq $ExpectedNum ]
+		then
+			if [ -z "$list" ]
+			then
+				list=$i
+			else
+				list="$list $i"
+			fi
+		fi
+	done
+done
+
+################ START PROCESSING ################
+
+cd $TMP
+
+if [ "$Sim" == "1" ]
+then
+	### Multiplying the reference masks with the Rank Map
+	echoV "----->	Multiplying the reference masks with the Rank Maps ..." 1
+	for i in $(cat $Templates)
+	do
+		for registrationmethod in $methodList
+		do
+			echoV "\n--> 3dcalc \n
+			 -prefix ${TMP}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI_ranked.nii.gz \n
+			 -a ${src}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI.nii.gz \n
+			 -b ${ranks}${InbName}-Template${i}_Sim_${registrationmethod}${Ranked} \n
+			 -expr 'a*b' \n
+			 -nscale \n
+			 -float \n
+			 -verbose;"
+
+			if [ "$verbose" == "1" ];
+			then
+				3dcalc \
+				 -prefix ${TMP}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI_ranked.nii.gz \
+				 -a ${src}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI.nii.gz \
+				 -b ${ranks}${InbName}-Template${i}_Sim_${registrationmethod}${Ranked} \
+				 -expr 'a*b' \
+				 -nscale \
+				 -float \
+				 -verbose;
+			else
+				3dcalc \
+				 -prefix ${TMP}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI_ranked.nii.gz \
+				 -a ${src}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI.nii.gz \
+				 -b ${ranks}${InbName}-Template${i}_Sim_${registrationmethod}${Ranked} \
+				 -expr 'a*b' \
+				 -nscale \
+				 -float \
+				 -verbose > ${TMP}Debug.log 2>&1;
+			fi	
+
+			checkExitCode $? "\nERROR: Multiplication of reference mask with Rank Map for ${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI failed!!!"
+		done
+	done
+else
+	### Importing the RankMasks
+	RankMask=${InSpace%.gz}
+	echoV "----->	Importing the ROI Labels ..." 1
+	for i in $(cat $Templates)
+	do
+		for registrationmethod in $methodList
+		do
+			combine1ROI-import nii.gz ${src}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI.nii.gz ${TMP}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI_ranked
+		done
+	done
+fi
+
+### Summing up the Jacobian Ranks within each reference mask
+echoV "----->	Summing up the Ranks within each reference mask ..." 1
+echoV "\n--> 3dMean \n
+ -verbose \n
+ -prefix ${TMP}${pref} \n
+ -datum float \n
+ -nscale \n
+ -sum `for i in $(cat $Templates); 
+ 	do 
+ 		for registrationmethod in $methodList
+ 		do
+ 			ls ${TMP}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI_ranked.nii.gz; 
+ 		done;
+ 	done`;"
+
+if [ "$verbose" == "1" ];
+then
+	3dMean \
+	 -verbose \
+	 -prefix ${TMP}${pref} \
+	 -datum float \
+	 -nscale \
+	 -sum `for i in $(cat $Templates); 
+	 	do 
+	 		for registrationmethod in $methodList
+	 		do
+	 			ls ${TMP}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI_ranked.nii.gz; 
+	 		done;
+	 	done`;
+else
+	3dMean \
+	 -verbose \
+	 -prefix ${TMP}${pref} \
+	 -datum float \
+	 -nscale \
+	 -sum `for i in $(cat $Templates); 
+	 	do 
+	 		for registrationmethod in $methodList
+	 		do
+	 			ls ${TMP}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI_ranked.nii.gz; 
+	 		done;
+	 	done` > ${TMP}Debug.log 2>&1;
+fi	
+checkExitCode $? "\nERROR: Summing up of Rank Masks failed!!!"
+
+### Correcting for intensitites using z-scores
+if [ "$ic" == "1" ]
+then
+	echoV "----->	Correcting for intensities within the RankMask ..." 1
+
+	### Decide which image to use for calculating the intensity variation: Fuzzy segmentation or the multi-atlas image?
+	### If background ROI, use the fuzzy as it would give a better estimate of the intensity variation in the CSF
+	if [ -n "$Fuzzy" ] && [ "$BG" == "1" ]
+	then
+		IntVariation=$Fuzzy
+	else
+		IntVariation=${TMP}${pref}
+	fi			
+
+	### Calculate 100% mask
+	perc=90
+	p100=`3dBrickStat -slow -max ${IntVariation}`
+	pCut=`echo "scale=2; $p100 * ${perc} / 100" | bc`
+
+	echoV "\t-->	Calculating the high confidence mask where ${perc}% of the templates agree ..." 1
+	echoV "\n--> 3dcalc \n
+	 -verbose \n
+	 -nscale \n
+	 -byte \n
+	 -prefix ${TMP}ThreshMask.nii.gz \n
+	 -a ${IntVariation} \n
+	 -expr 'step(a-${pCut})';"
+
+	if [ "$verbose" == "1" ];
+	then
+		3dcalc \
+		 -verbose \
+		 -nscale \
+		 -byte \
+		 -prefix ${TMP}ThreshMask.nii.gz \
+		 -a ${IntVariation} \
+		 -expr "step(a-${pCut})";
+	else
+		3dcalc \
+		 -verbose \
+		 -nscale \
+		 -byte \
+		 -prefix ${TMP}ThreshMask.nii.gz \
+		 -a ${IntVariation} \
+		 -expr "step(a-${pCut})" > ${TMP}Debug.log 2>&1;
+	fi	
+	checkExitCode $? "\nERROR: Calculation of the 100% mask failed!!!"
+
+	### Calculate mean and stdev within 100% mask
+	echoV "\t-->	Calculating the mean and stdev of intensities within the 100% mask ..." 1
+	Stats=`3dBrickStat -slow -mean -var -mask ${TMP}ThreshMask.nii.gz ${input}`
+	mean=`echo $Stats | awk '{ print $1 }'`
+	var=`echo $Stats | awk '{ print $2 }'`
+	varFloat=`printf '%.7f\n' ${var}`
+#	stdev=`echo "scale=4; sqrt($var)" | bc`
+	stdev=`echo "scale=4; sqrt($varFloat)" | bc`
+
+	### Calculate absolute z-scores
+	echoV "\t-->	Calculating the absolute z-scores ..." 1
+	echoV "\n--> 3dcalc \n
+	 -verbose \n
+	 -nscale \n
+	 -float \n
+	 -prefix ${TMP}Zscores.nii.gz \n
+	 -a ${input} \n
+	 -b ${IntVariation} \n
+	 -expr 'step(b)*abs((a-${mean})/${stdev})';"
+
+	if [ "$verbose" == "1" ];
+	then
+		3dcalc \
+		 -verbose \
+		 -nscale \
+		 -float \
+		 -prefix ${TMP}Zscores.nii.gz \
+		 -a ${input} \
+		 -b ${IntVariation} \
+		 -expr "step(b)*abs((a-${mean})/${stdev})";
+	else
+		3dcalc \
+		 -verbose \
+		 -nscale \
+		 -float \
+		 -prefix ${TMP}Zscores.nii.gz \
+		 -a ${input} \
+		 -b ${IntVariation} \
+		 -expr "step(b)*abs((a-${mean})/${stdev})" > ${TMP}Debug.log 2>&1;
+	fi	
+	checkExitCode $? "\nERROR: Calculation of the z-scores failed!!!"
+
+	### Invert z-scores
+	echoV "\t-->	Inverting the z-scores and converting to probabilities ..." 1
+	max=`3dBrickStat -slow -non-zero -max ${TMP}Zscores.nii.gz`
+	e2=`echo "scale=4; e(2)" | bc -l`
+		
+	echoV "\n--> 3dcalc \n
+	 -verbose \n
+	 -nscale \n
+	 -float \n
+	 -prefix ${TMP}Zscores_inv_Exp2.nii.gz \n
+	 -a ${TMP}Zscores.nii.gz \n
+	 -expr 'step(a)*exp(2*step(a)*(1-a/${max}))/${e2}';"
+
+	if [ "$verbose" == "1" ];
+	then
+		3dcalc \
+		 -verbose \
+		 -nscale \
+		 -float \
+		 -prefix ${TMP}Zscores_inv_Exp2.nii.gz \
+		 -a ${TMP}Zscores.nii.gz \
+		 -expr "step(a)*exp(2*step(a)*(1-a/${max}))/${e2}";
+	else
+		3dcalc \
+		 -verbose \
+		 -nscale \
+		 -float \
+		 -prefix ${TMP}Zscores_inv_Exp2.nii.gz \
+		 -a ${TMP}Zscores.nii.gz \
+		 -expr "step(a)*exp(2*step(a)*(1-a/${max}))/${e2}" > ${TMP}Debug.log 2>&1;
+	fi	
+	checkExitCode $? "\nERROR: Conversion z-scores to probabilities failed!!!"
+
+	### Adding the JacRank probability and the Exp2AbsInvZscore map
+	
+	max=`3dBrickStat -slow -max ${TMP}${pref}`
+	max=${max% }
+	
+	# Preparing the command
+	CMD="3dcalc \
+		-nscale \
+		-float \
+		-verbose \
+		-prefix ${TMP}IntensityCorrected.nii.gz \
+		-a ${TMP}${pref} \
+		-b ${TMP}Zscores_inv_Exp2.nii.gz"
+	
+	# Modifying the command if its a background ROI
+	if [ -z "$WML" ]
+	then
+#		if [ "$BG" == "1" ]
+#		then
+#			# When the ROI to be processes is background, give it higher weight so there is no over-segmentation of the cortical GM ROIs
+#	
+#			echoV "\t-->	Adding the SimRank Probabilities and the Intensity Probabilities, giving higher weight to the Background ..." 1
+#			echoV "\n--> $CMD \n
+#				 -expr 'a/${max}+1.5*b';"
+#			
+#			# Implement the command
+#			if [ "$verbose" == "1" ];
+#			then
+#				$CMD \
+#				 -expr "a/${max}+1.5*b";
+#			else
+#				$CMD \
+#				 -expr "a/${max}+1.5*b" > ${TMP}Debug.log 2>&1;
+#			fi	
+#			checkExitCode $? "\nERROR: Addition of the Intensity and Similarity probabilities, while giving higher weight to background failed!!!"
+#
+#		else
+			# For a normal case where there is no WML mask and the ROI is not a background ROI
+			# This is what should be happening in most/normal cases
+			
+			echoV "\t-->	Adding the SimRank Probabilities and the Intensity Probabilities ..." 1
+			echoV "\n--> $CMD \n
+				 -expr 'a/${max}+b';"
+			
+			# Implement the command
+			if [ "$verbose" == "1" ];
+			then
+				$CMD \
+				 -expr "a/${max}+b";
+			else
+				$CMD \
+				 -expr "a/${max}+b" > ${TMP}Debug.log 2>&1;
+			fi	
+			checkExitCode $? "\nERROR: Addition of the Intensity and Similarity probabilities failed!!!"
+
+#		fi			
+	else
+		if [ "$WM" == "1" ]
+		then
+			# When a WML mask is provided and it is a WM ROI, provide a higher weight to intensity correction within the area of the WML mask
+	
+			echoV "\t-->	Adding the SimRank Probabilities and the Intensity Probabilities, giving higher weight to the WM within the WML mask ..." 1
+			echoV "\n--> $CMD \n
+				 -c $WML \n
+				 -expr 'a/${max}+iszero(c)*b+1.5*step(c)*b';"
+
+			# Implement the command
+			if [ "$verbose" == "1" ];
+			then
+				$CMD \
+				 -c $WML \
+				 -expr "a/${max}+iszero(c)*b+1.5*step(c)*b";
+			else
+				$CMD \
+				 -c $WML \
+				 -expr "a/${max}+iszero(c)*b+1.5*step(c)*b" > ${TMP}Debug.log 2>&1;
+			fi	
+			checkExitCode $? "\nERROR: Addition of the Intensity and Similarity probabilities, while giving higher weight to WM within the WML mask failed!!!"
+
+		else
+			# When a WML mask is specified and the ROI is not WM, do not apply any intensity correction within the area of the mask
+	
+			echoV "\t-->	Adding the SimRank Probabilities and the Intensity Probabilities, excluding the area within the WML mask ..." 1
+			echoV "\n--> $CMD \n
+				 -c $WML \n
+				 -expr 'a/${max}+iszero(c)*b';"
+
+			# Implement the command
+			if [ "$verbose" == "1" ];
+			then
+				$CMD \
+				 -c $WML \
+				 -expr "a/${max}+iszero(c)*b";
+			else
+				$CMD \
+				 -c $WML \
+				 -expr "a/${max}+iszero(c)*b" > ${TMP}Debug.log 2>&1;
+			fi	
+			checkExitCode $? "\nERROR: Addition of the Intensity and Similarity probabilities, while excluding the non-WM area within the WML mask failed!!!"
+
+		fi	
+	fi
+		
+	rmV ${TMP}${pref}
+	rmV ${TMP}Zscores_inv_Exp2.nii.gz
+	rmV ${TMP}Zscores.nii.gz
+	rmV ${TMP}ThreshMask.nii.gz
+	rmV ${TMP}Debug.log
+	
+	### Transferring the results to the destination
+	mvV ${TMP}IntensityCorrected.nii.gz ${TMP}${pref}
+fi	
+
+if [ -n "$Fuzzy" ] && [ -f $Fuzzy ]
+then
+	echoV "----->	Adding fuzzy segmentation weight to the RankMask ..." 1
+	echoV "\n--> 3dcalc \n
+	 -verbose \n
+	 -nscale \n
+	 -float \n
+	 -prefix ${TMP}FuzzyAdded.nii.gz \n
+	 -a ${TMP}${pref} \n
+	 -b $Fuzzy \n
+	 -expr 'step(a+b-1)*(a+b-1)';"
+
+	if [ "$verbose" == "1" ];
+	then
+		3dcalc \
+		 -verbose \
+		 -nscale \
+		 -float \
+		 -prefix ${TMP}FuzzyAdded.nii.gz \
+		 -a ${TMP}${pref} \
+		 -b $Fuzzy \
+		 -expr "step(a+b-1)*(a+b-1)";
+	else
+		3dcalc \
+		 -verbose \
+		 -nscale \
+		 -float \
+		 -prefix ${TMP}FuzzyAdded.nii.gz \
+		 -a ${TMP}${pref} \
+		 -b $Fuzzy \
+		 -expr "step(a+b-1)*(a+b-1)" > ${TMP}Debug.log 2>&1;
+	fi	
+	checkExitCode $? "\nERROR: Addition of fuzzy segmentation weight failed!!!"
+
+	rmV ${TMP}${pref}
+	rmV ${TMP}Debug.log
+	
+	### Transferring the results to the destination
+	mvV ${TMP}FuzzyAdded.nii.gz ${TMP}${pref}
+fi
+
+echoV "----->	Smoothing the final RankMask by 1 voxel (or mm?)..." 1
+echoV "\n--> 3dmerge \n
+	 -1blur_fwhm 1 \n
+	 -prefix ${TMP}Smoothed.nii.gz \n
+	 ${TMP}${pref};"
+
+if [ "$verbose" == "1" ];
+then
+	3dmerge \
+	 -1blur_fwhm 1 \
+	 -prefix ${TMP}Smoothed.nii.gz \
+	 ${TMP}${pref};
+else
+	3dmerge \
+	 -1blur_fwhm 1 \
+	 -prefix ${TMP}Smoothed.nii.gz \
+	 ${TMP}${pref} > ${TMP}Debug.log 2>&1;
+fi	
+checkExitCode $? "\nERROR: Smoothing of the final RankMask failed!!!"
+
+### Transferring the results to the destination
+rmV ${TMP}${pref}
+mvV ${TMP}Smoothed.nii.gz ${TMP}${pref}
+
+
+### Transferring the results to the destination
+echoV "----->	Transferring the results to destination ..." 1
+mvV ${TMP}${pref} ${dest}${pref}
+
+### Removing the remaining files
+echoV "----->	Removing some of the remaining files from ${TMP} ..." 1
+for i in $(cat $Templates)
+do
+	for registrationmethod in $methodList
+	do
+		rmV ${TMP}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI_ranked.nii.gz
+		rmV ${src}${InbName}-Template${i}${InSpace}_${registrationmethod}_ROI.nii.gz
+	done
+done
+rmV ${TMP}Debug.log
+rmdirV ${TMP}
+rmdirV ${src}
+
+### Execution Time
+executionTime $startTimeStamp
+
+################################################ END ################################################

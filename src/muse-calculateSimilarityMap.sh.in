@@ -1,0 +1,465 @@
+#!/bin/bash
+#include<string.h>
+
+. @LIBRARY_DIR@/muse-functions || { echo "Failed to source MUSE functions!" 1>&2; exit 1; }
+
+################################################ FUNCTIONS ################################################
+
+### Version info
+print_version()
+{
+	# Print version
+	ver="$Revision: 379 $"
+	echo -e "@PROJECT_VERSION@ ( rev${ver%$})"
+
+	exit 0
+}
+
+help()
+{
+cat <<HELP
+
+This script does the following:
+
+
+
+##############################################
+USAGE :	$0 [OPTIONS]
+OPTIONS:
+
+Reqd:	-a 	   < file >	absolute path to the input file 
+	-b	   < path >	absolute path to the destination where the results are to be stored
+	-sim	   < file >	list of ROIs to be considered
+
+Misc:	-v	   < 0/1 >	verbose output (default: 0 - verbose off)
+	-V			Version Information
+
+ERROR: Not enough arguments!!
+##############################################
+
+HELP
+exit 1
+}
+
+cleanUpandExit()
+{
+	echo -e ":o:o:o:o:o Aborting Operations .... \n\n"
+	
+	if [ -d "$TMP" ]
+	then
+		if [ "$TMP" == "$dest" ]
+		then
+			rmV ${TMP}${AllSim}
+			rmV ${TMP}${AllSimRanked}
+			rmV ${TMP}${InbName%.nii.gz}_RankMasks.lst
+			rmV ${TMP}${InbName}.nii.gz
+			
+			for i in $(cat $Templates)
+			do
+				rmV ${TMP}Template${i}${SimRank}
+				rmV ${TMP}Template${i}${final}	
+			done
+			
+			while read label
+			do
+				rmV ${TMP}${InbName%.nii.gz}_ROI_${label}${RankMask}
+			done < ${TMP}ROIs.lst
+		else
+			if [ "$verbose" == "1" ]
+			then
+				rm -rfv ${TMP}
+			else
+				rm -rf ${TMP}
+			fi
+		fi
+	fi
+	
+	executionTime		
+	exit 1
+}
+
+parse()
+{
+	while [ -n "$1" ]; do
+		case $1 in
+			-h) 
+				help;
+				shift 1;;
+		     	-a) 
+				InpA=$2;
+				
+				checkFile $InpA
+				
+				temp=`FileAtt $InpA`				
+				InpAExt=`echo $temp | awk '{ print $1 }'`
+				InpAbName=`echo $temp | awk '{ print $2 }'`
+				InpADir=`echo $temp | awk '{ print $3 }'`
+				
+				InpA=${InpADir}/${InpAbName}.${InpAExt}
+				
+				shift 2;;
+		     	-b) 
+				InpB=$2;
+
+				checkFile $InpB
+				
+				temp=`FileAtt $InpB`				
+				InpBExt=`echo $temp | awk '{ print $1 }'`
+				InpBbName=`echo $temp | awk '{ print $2 }'`
+				InpBDir=`echo $temp | awk '{ print $3 }'`
+				
+				InpB=${InpBDir}/${InpBbName}.${InpBExt}
+
+				shift 2;;
+			-sim) 
+				Sim=$2;
+				
+				temp=`FileAtt $Sim`
+				SimExt=`echo $temp | awk '{ print $1 }'`
+				SimbName=`echo $temp | awk '{ print $2 }'`
+				SimDir=`echo $temp | awk '{ print $3 }'`
+				
+				Sim=${SimDir}/${SimbName}.${SimExt}
+
+				shift 2;;
+			-v) 
+				verbose=$2;
+				shift 2;;
+			-V) 
+				print_version; 
+				exit 0;;
+			-*) 
+				echo "ERROR: no such option $1";
+				help;;
+			 *) 
+				break;;
+		esac
+	done
+}
+
+import()
+{
+	ext=$1
+	inFile=$2
+	outFile=$3
+	
+	if [ ! -f ${outFile}.hdr ]
+	then
+		if [ "${ext}" == "nii.gz" ] || [ "${ext}" == "nii" ] || [ "${ext}" == "img" ]
+		then
+			echoV "nifti1_test -n2 ${inFile} ${outFile}"
+			nifti1_test -n2 ${inFile} ${outFile}
+		elif [ "${ext}" == "hdr" ]
+		then
+			echoV "nifti1_test -n2 ${inFile%.hdr}.img ${outFile}"
+			nifti1_test -n2 ${inFile%.hdr}.img ${outFile}
+		fi	
+	fi
+}
+
+################################################ END OF FUNCTIONS ################################################
+
+################################################ MAIN BODY ################################################
+
+### Making sure the POSIXLY_CORRECT variable is unset as it causes bash to misbehave
+if [ ${POSIXLY_CORRECT} ]
+then
+	unset  POSIXLY_CORRECT
+fi
+
+### Checking for the number of arguments
+if [ $# -lt 1 ]
+then
+	help
+fi
+
+### Checking if the first argument is -V
+if [ $1 == "-V" ]
+then
+	print_version;
+fi
+
+### Timestamps
+startTime=`date +%F-%H:%M:%S`
+startTimeStamp=`date +%s`
+
+echo -e "\nRunning commands on		: `hostname`"
+echo -e "Start time			: ${startTime}\n"
+
+### Default Parameters
+DIR_EXE=@DRAMMS_LIBRARY_DIR@
+scripts=@LIBRARY_DIR@/
+verbose=0
+
+### Specifying the trap signal
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGHUP signal'" SIGHUP 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGINT signal'" SIGINT 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGTERM signal'" SIGTERM 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGKILL signal'" SIGKILL
+
+### Reading the arguments
+echo -e "\nParsing arguments		: $*"
+parse $*
+
+# Checking if required options are provided
+if [ -z "$InpA" ] || [ -z "$InpB" ] || [ -z "$Sim" ]
+then
+	echo -e "\nERROR: Required options not provided!!!"
+	exit 1
+fi
+
+if [ "$verbose" == "1" ]
+then
+	echo -e "\n\tInput image A		: $InpA"
+	echo -e "\tInput image B		: $InpB"
+	echo -e "\tOutput Similarity Map	: ${Sim}"
+fi
+
+# create temporary folder
+PID=$$
+createTempDir muse-calculateSimilarityMap $PID
+echoV "\n----->	Temporary local directory created at $TMP ...\n" 1
+
+### Importing required input files to the temp dir
+echoV "----->	Importing the required input files ..." 1
+import ${InpAExt} ${InpA} ${TMP}${InpAbName}
+import ${InpBExt} ${InpB} ${TMP}${InpBbName}
+
+### Converting the input images to byte
+echoV "----->	Converting the input images to byte ..." 1
+
+echoV "\t-->	Processing input image A" 1
+echoV "\n--> ${DIR_EXE}/ConvertImage \n
+	-s \n
+	-e \n
+	--reset-scaling \n
+	-t uchar \n
+	-m 0 \n
+	-M 255 \n
+	${TMP}${InpAbName}.img \n
+	${TMP}A_byte_iter1.img \n
+	-v -v;"
+
+CMD="${DIR_EXE}/ConvertImage \
+	-s \
+	-e \
+	--reset-scaling \
+	-t uchar \
+	-m 0 \
+	-M 255 \
+	${TMP}${InpAbName}.img \
+	${TMP}/A_byte_iter1.img \
+	-v -v"
+	
+if [ "$verbose" == "1" ]
+then
+	$CMD
+else
+	$CMD > ${TMP}Debug.log 2>&1;
+fi
+checkExitCode $? "\nERROR: Converting $InpA to byte failed!!!"
+
+echoV "\t-->	Processing input image B" 1
+echoV "\n--> ${DIR_EXE}/ConvertImage \n
+	-s \n
+	-e \n
+	--reset-scaling \n
+	-t uchar \n
+	-m 0 \n
+	-M 255 \n
+	${TMP}${InpBbName}.img \n
+	${TMP}/B_byte_iter1.img \n
+	-v -v;"
+
+CMD="${DIR_EXE}/ConvertImage \
+	-s \
+	-e \
+	--reset-scaling \
+	-t uchar \
+	-m 0 \
+	-M 255 \
+	${TMP}${InpBbName}.img \
+	${TMP}/B_byte_iter1.img \
+	-v -v"
+	
+if [ "$verbose" == "1" ]
+then
+	$CMD
+else
+	$CMD > ${TMP}Debug.log 2>&1;
+fi
+checkExitCode $? "\nERROR: Converting $InpB to byte failed!!!"
+
+### Finding effective intensity range for images
+echoV "----->	Finding effective intensity range for images ..." 1
+
+for im in A B
+do
+	for iter in {2..5}
+	do
+		echoV "\t-->	Processing input image ${im}: iteration=${iter}" 1
+		prev_iter=$(( ${iter} - 1 ))
+		max=`${DIR_EXE}/ConvertImage \
+			-e \
+			--reset-scaling \
+			-t uchar \
+			-m 0 \
+			-M 255 \
+			${TMP}/${im}_byte_iter${prev_iter}.img \
+			${TMP}/${im}_byte_iter${iter}.img \
+			-v -v | grep 'max' | cut -d'=' -f3 | cut -d'.' -f1`
+		
+		echoV "max=${max}"
+	
+		if [ ${max} -gt 200 ]
+		then
+			mvV ${TMP}/${im}_byte_iter${iter}.img ${TMP}/${im}_byte.img
+			mvV ${TMP}/${im}_byte_iter${iter}.hdr ${TMP}/${im}_byte.hdr
+			break;
+		fi
+	done
+done
+
+### Getting a float header for the output image
+echoV "----->	Getting a float header for the final Similarity map ..." 1
+echoV "${DIR_EXE}/ConvertImage \n
+	-e \n
+	--reset-scaling \n
+	-t float \n
+	${TMP}${InpBbName}.img \n
+	${TMP}/tmpfloat.img;"
+	
+CMD="${DIR_EXE}/ConvertImage \
+	-e \
+	--reset-scaling \
+	-t float \
+	${TMP}${InpBbName}.img \
+	${TMP}/tmpfloat.img"
+
+if [ "$verbose" == "1" ]
+then
+	$CMD
+else
+	$CMD > ${TMP}Debug.log 2>&1;
+fi
+checkExitCode $? "\nERROR: Creation of a float header failed!!!"
+
+### Getting image dimensions
+echoV "----->	Getting image dimensions ..." 1
+
+xSize=`fslinfo ${TMP}/B_byte.img | awk '$1 == "dim1" { print $2 }'`
+ySize=`fslinfo ${TMP}/B_byte.img | awk '$1 == "dim2" { print $2 }'`
+zSize=`fslinfo ${TMP}/B_byte.img | awk '$1 == "dim3" { print $2 }'`
+
+echoV "Image size = ($xSize, $ySize, $zSize)"
+
+### Extract Gabor features
+echoV "----->	Extracting Gabor features ..." 1
+cd ${TMP}
+
+numGaborScales=4
+numGaborOrientations=6
+ul=0.1
+uh=1.6
+
+for im in A B
+do
+	echoV "\t-->	Processing input image ${im}" 1
+	echoV "${DIR_EXE}/CalculateGaborTextures \n
+		-s$numGaborScales \n
+		-o$numGaborOrientations \n
+		-u${ul},${uh} \n
+		-x2 \n
+		${im}_byte.img \n
+		${im};"
+	
+	CMD="${DIR_EXE}/CalculateGaborTextures \
+		 -s$numGaborScales \
+		 -o$numGaborOrientations \
+		 -u${ul},${uh} \
+		 -x2 \
+		 ${im}_byte.img \
+		 ${im}"
+		 
+	if [ "$verbose" == "1" ]
+	then
+		$CMD
+	else
+		$CMD > ${TMP}Debug.log 2>&1;
+	fi
+	checkExitCode $? "\nERROR: Genrating Gabor features for Image ${im} failed!!!"
+done	 
+
+### Generating Gabor list files
+echoV "----->	Generating Gabor list files ..." 1
+
+for im in A B
+do
+	echoV "\t-->	Processing input image $im" 1
+	CMD="${DIR_EXE}/GenerateGaborListFile -s2 -o$numGaborOrientations $im Gabor_${im}.lst"
+	
+	if [ "$verbose" == "1" ]
+	then
+		$CMD
+	else
+		$CMD > ${TMP}Debug.log 2>&1;
+	fi
+	
+	sed -i 's/.nii.gz/.img/g' Gabor_${im}.lst
+done
+
+### Calculate similarity map
+echoV "----->	Calculating Similarity Map ..." 1
+
+echoV "${scripts}/calculateSimilarityMap \n
+	A_byte.img \n
+	B_byte.img \n
+	Gabor_ \n
+	similarityMap.img \n
+	-d${ySize},${xSize};"
+
+CMD="${scripts}/calculateSimilarityMap \
+	A_byte.img \
+	B_byte.img \
+	Gabor_ \
+	similarityMap.img \
+	-d${ySize},${xSize}" # using exp(-dist/75.0) as similarity definition
+
+if [ "$verbose" == "1" ]
+then
+	$CMD
+else
+	$CMD > ${TMP}Debug.log 2>&1;
+fi
+
+# checking if the file exists and its not empty
+if [ ! -f similarityMap.img ] || [ ! -s similarityMap.img ]
+then
+	checkExitCode 1 "\nERROR: Calculation of Similarity Map failed!!!"
+fi
+
+cpV ${TMP}/tmpfloat.hdr ${TMP}/similarityMap.hdr
+
+### Compressing the final results
+echoV "----->	Compressing the final results ..." 1
+convertToNifti ${TMP}/similarityMap.img
+
+### Moving the results to the destination directory
+echoV "----->	Moving the results to the destination directory ..." 1
+
+mkdirV $SimDir
+mvV ${TMP}/similarityMap.nii.gz ${Sim}
+
+### Removing the temporary folder
+echoV "----->	Removing the temporary directory ..." 1
+if [ "$verbose" == "1" ]
+then
+	rm -rfv ${TMP}
+else
+	rm -rf ${TMP}
+fi
+
+### Execution Time 
+executionTime $startTimeStamp
+
+################################################ END ################################################

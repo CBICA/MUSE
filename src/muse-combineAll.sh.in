@@ -1,0 +1,277 @@
+#!/bin/bash
+
+#. ${BASIS_BASH_UTILITIES} || { echo "Failed to source BASIS utilities!" 1>&2; exit 1; }
+. @LIBRARY_DIR@/muse-functions || { echo "Failed to source MUSE functions!" 1>&2; exit 1; }
+
+################################################ FUNCTIONS ################################################
+
+### Version info
+print_version()
+{
+	# Print version
+	ver="$Revision: 368 $"
+	echo -e "@PROJECT_VERSION@ ( rev${ver%$})"
+
+	exit 0
+}
+
+help()
+{
+cat <<HELP
+
+This script does the following:
+
+
+
+##############################################
+USAGE :	$0 [OPTIONS]
+OPTIONS:
+
+Reqd:		-R 	   < file >	absolute path to the text file containing the absolute paths of all individual ranks to be combined
+
+Optional:	-dest	   < path >	absolute path to the destination where the results are to be stored (default: same as -R)
+		-comb	   < pattern >	prefix for the binary/discrete combined ROI mask (default: Combined.nii.gz)
+		-scripts   < path >	absolute path to the directory where Fuse1ROI.sh script is stored (default: @LIBRARY_DIR@/)
+					this argument becomes important when you are submitting ** THIS ** script to the computing cluster.
+		-Ranks	   < 0/1 >	keep the Weighted Rank masks (default: 0-delete)
+		-v	   < 0/1 >	verbose output (default: 0 - verbose off)
+		-V			Version Information
+		-tmp	   < path >	absolute path to the temporary directory
+		-int	   < int >	keep intermediate files. 
+					0 - delete all intermediate files (default)
+					1 - Keep only the important files. 
+					2 - Keep all intermediate files 
+
+ERROR: Not enough arguments!!
+##############################################
+
+HELP
+exit 1
+}
+
+cleanUpandExit()
+{
+	echo -e ":o:o:o:o:o Aborting Operations .... \n\n"
+	
+	if [ -d "$TMP" ]
+	then
+		if [ "$TMP" == "$dest" ]
+		then
+			rmV ${TMP}Debug.log
+		else
+			if [ "$verbose" == "1" ]
+			then
+				rm -rfv ${TMP}
+			else
+				rm -rf ${TMP}
+			fi
+		fi
+	fi
+	
+	executionTime		
+	exit 1
+}
+
+parse()
+{
+	while [ -n "$1" ]; do
+		case $1 in
+			-h) 
+				help;
+				shift 1;;
+		     	-R) 
+				ranks=$2;
+				checkFile $ranks; 
+
+				shift 2;;
+			-dest) 
+				dest=`checkPath $2`;
+				shift 2;;
+			-v) 
+				verbose=$2;
+				shift 2;;
+			-comb) 
+				comb=$2;
+				shift 2;;
+			-scripts) 
+				scripts=`checkPath $2`;
+				shift 2;;
+			-Ranks) 
+				Ranks=$2;
+				shift 2;;
+			-V) 
+				print_version; 
+				exit 0;;
+			-int) 
+				int=$2;
+				shift 2;;
+			-tmp) 
+				tmpDirToUse=`checkPath $2`;
+				shift 2;;
+			-*) 
+				echo "ERROR: no such option $1";
+				help;;
+			 *) 
+				break;;
+		esac
+	done
+}
+
+################################################ END OF FUNCTIONS ################################################
+
+################################################ MAIN BODY ################################################
+
+### Making sure the POSIXLY_CORRECT variable is unset as it causes bash to misbehave
+if [ ${POSIXLY_CORRECT} ]
+then
+	unset  POSIXLY_CORRECT
+fi
+
+### Checking for the number of arguments
+if [ $# -lt 1 ]; then
+	help
+fi
+
+### Checking if the first argument is -V
+if [ $1 == "-V" ]
+then
+	print_version;
+fi
+
+### Timestamps
+startTime=`date +%F-%H:%M:%S`
+startTimeStamp=`date +%s`
+
+echo -e "\nRunning commands on		: `hostname`"
+echo -e "Start time			: ${startTime}\n"
+
+### Default Parameters
+scripts=@LIBRARY_DIR@/
+Ranks=0
+comb=Combined.nii.gz
+verbose=0
+int=0
+
+### Specifying the trap signal
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGHUP signal'" SIGHUP 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGINT signal'" SIGINT 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGTERM signal'" SIGTERM 
+trap "checkExitCode 1 '\nProgram Interrupted. Received SIGKILL signal'" SIGKILL
+
+### Reading the arguments
+echo -e "\nParsing arguments		: $*"
+parse $*
+
+# Checking if required options are provided
+if [ -z "$ranks" ]
+then
+	echo -e "\nERROR: Required options not provided!!!"
+	exit 1
+fi
+
+if [ -z "$dest" ]
+then
+	dest=`dirname $ranks`/
+fi
+
+if [ "$verbose" == "1" ]
+then
+	echo -e "\tRankMask List 			: $ranks"
+	echo -e "\tCombined ROI Mask		: ${dest}${comb}"
+
+	echo -e "\nPARAMETERS"
+	echo -e "\tRetain Weighted Rank Masks	: `if [ "$Ranks" == "0" ]; then echo "NO"; else echo "YES"; fi`"
+fi
+
+### Checking for all input files
+echoV "\n\n----->	Checking if all input ranks masks exist ..." 1
+
+while read f
+do
+	checkFile $f
+done < $ranks
+
+### Creating temporary directory
+createTempDir muse-combineAll $PID
+echoV "\n----->	Temporary local directory created at $TMP ...\n" 1
+
+
+
+### Run combination
+echoV "----->	Combining the Rank Masks  ..." 1
+
+echoV "\n--> ${scripts}muse_combineRoiMapsSparse \n
+	 ${ranks} \n
+	 ${TMP}${comb};"
+
+if [ "$verbose" == "1" ]
+then
+	${scripts}muse-combineRoiMapsIter \
+	 ${ranks} \
+	 ${TMP}${comb};
+else
+	${scripts}muse-combineRoiMapsIter \
+	 ${ranks} \
+	 ${TMP}${comb} > ${TMP}Debug.log 2>&1;
+fi
+	
+if [ ! -f ${TMP}${comb} ]
+then
+	checkExitCode 1 "\nERROR: Combination of Rank Masks failed!!!"
+fi
+
+### Converting the final image to byte
+echoV "\t-->	Converting the final labeled image to byte ..." 1
+echoV "\n--> 3dcalc \n
+ -prefix ${TMP}${comb%.nii.gz}_byte.nii.gz \n
+ -a ${TMP}${comb} \n
+ -expr 'a' \n
+ -verbose \n
+ -nscale \n
+ -byte;"
+
+if [ "$verbose" == "1" ]
+then
+	3dcalc \
+	 -prefix ${TMP}${comb%.nii.gz}_byte.nii.gz \
+	 -a ${TMP}${comb} \
+	 -expr "a" \
+	 -verbose \
+	 -nscale \
+	 -byte;
+else
+	3dcalc \
+	 -prefix ${TMP}${comb%.nii.gz}_byte.nii.gz \
+	 -a ${TMP}${comb} \
+	 -expr "a" \
+	 -verbose \
+	 -nscale \
+	 -byte > ${TMP}Debug.log 2>&1;
+fi
+
+checkExitCode $? "\nERROR: Conversion to byte failed!!!"
+	
+rmV ${TMP}${comb}
+mvV ${TMP}${comb%.nii.gz}_byte.nii.gz ${dest}${comb}
+	
+### If the user does not need the individual Rank Masks, delete them
+if [ "$Ranks" == "0" ] && [ "$int" != 2 ]
+then
+	echoV "----->	Removing the Rank Masks  ..." 1
+	while read f
+	do
+		rmV ${f}
+	done < ${ranks}
+
+	rmV ${ranks}
+fi
+
+### Remove temporary files from the temporary folder
+echoV "----->	Removing temporary files from TMPDIR ..." 1
+rmV ${TMP}Debug.log
+rmdirV ${TMP}
+
+### Execution Time
+executionTime $startTimeStamp
+
+################################################ END ################################################
