@@ -17,6 +17,7 @@ Changes
 
 Release 3.1.0 (Apr 17, 2020)
 -----------------------------
+- Replaced the WithCere Templates with Templates_withCSF
 - Added BrainExtraction templates.
 - Removed NoCere templates.
 - Modified muse.sh.in to add the -B/--brainextraction option for BrainExtraction. Remove the -C/--noCere option
