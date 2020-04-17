@@ -63,7 +63,6 @@ Parameters:
 	[-I, --noIC]			do not apply intensity correction on the probabilities (default: apply)
 	[-S, --noSim]			do not apply similarity ranking on the probabilities (default: apply)
 	[-F, --noFuzzy]			do not add fuzzy segmentation of CSF to the probabilities (default: apply)
-	[-C, --noCere]			flag indicating that template without cerebellum should be used (default: use cerebellum)
 	[-W, --WML]	   < file >	absolute path to the WML mask (binary) which will be excluded from intensity correction (default: none)
 	[-c, --CSF]	   < float >	CSF Weight for MICO segmentation used to improve brain/non-brain segmentation (default: 1.2)
 	[-T, --regs]	   < int >	No. of templates to be used for registrations (default: 11)
@@ -72,6 +71,17 @@ Parameters:
 					0 - delete all intermediate files (default)
 					1 - Keep only the important files. 
 					2 - Keep all intermediate files 
+
+	[-B, --brainextraction]		flag indicating that brain extraction templates should be used (default: use roi segmentation templates)
+					using this flag implies the following changes to the args
+					--refPath @DATA_DIR@/Templates/BrainExtraction/
+					--ROI @DATA_DIR@/List/MUSE-SS_ROIs.csv
+					--refNum 50
+					--noIC
+					--noFuzzy
+					--mem 16
+					
+
 
 Scheduler:	
 	[-Q, --NOQ]			Flag indicating that computing cluster is not to be used
@@ -107,8 +117,8 @@ Examples:
 		Submit the muse script to SGE which will internally do the processing and then 
 		submit the muse-registrations and muse-labelFusion jobs
 		
-	muse -i /Path/To/Source/Directory/Input_n3_str.nii.gz -D /Path/To/Destination/Directory/ -noCere
-		Parcellate the input brain image using the default options, but without the cerebellum
+	muse -i /Path/To/Source/Directory/Input_n3_str.nii.gz -D /Path/To/Destination/Directory/ -B
+		Skull strip the input image using the default options
 		
 	muse -i /Path/To/src/dir/Input_n3_str.nii.gz -D /Path/To/dest/dir/ -W /Path/To/WMLS/dir/Input_n3_str_WMLS_mask.nii.gz
 		Parcellate the input brain image but use the WMLS mask to exclude those regions from 
@@ -249,8 +259,8 @@ parse()
 			-F|--noFuzzy) 
 				useFuzzy=0;
 				shift 1;;
-			-C|--noCere) 
-				Cere=0;
+			-B|--brainextraction) 
+				BrainExtraction=1;
 				shift 1;;
 			-p|--ranks) 
 				ranks=1;
@@ -363,7 +373,7 @@ verbose=0
 IC=1
 Sim=1
 useFuzzy=1
-Cere=1
+BrainExtraction=0
 ranks=0
 priority=-100
 holdqueue=""
@@ -430,19 +440,33 @@ fi
 TMPin=${TMP}${InbName}.nii.gz
 TMPref=${TMP}Template_Mean.nii.gz
 
-# Deciding whether to use templates with cerebellum or without
+# Checking if brain extraction is requested, instead of ROI segmentation
+if [ $BrainExtraction -eq 1 ] && [ -z "$ref" ]
+then
+	ref=${refPath}BrainExtraction/
+	ROI=@DATA_DIR@/List/MUSE-SS_ROIs.csv
+	refNum=50
+	IC=0
+	Sim=1
+	useFuzzy=0
+	mem=16
+fi
+
+# Is brainextraction is not requested, and there is no refPath provided
 if [ -z "$ref" ]
 then
-	case $Cere in
-		0) ref=${refPath}NoCere/ ;;
-		1) ref=${refPath}WithCere/ ;;
-	esac
+	ref=${refPath}WithCere/
 fi
 
 ### Making sure the output filenames are set
 if [ -z "$mask" ]
 then
-	mask=${InbName}_muse
+	if [ $BrainExtraction -eq 1 ]
+	then
+		mask=${InbName}_muse-ss
+	else
+		mask=${InbName}_muse
+	fi
 fi
 
 ### Checking if all Input files exist
