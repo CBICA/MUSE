@@ -1,0 +1,3 @@
+Index,Tissue_Type,Brain?,Name,Short_Name,Lobe_Name,Hemisphere,Notes
+0,BG,Non-Brain,background,BGND,,,Included to help with Intensity correction
+1,GM,Brain,Brain,,,,
