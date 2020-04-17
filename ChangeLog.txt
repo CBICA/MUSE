@@ -13,6 +13,14 @@
 Changes
 =======
 
+.. _v3.1.0:
+
+Release 3.1.0 (Apr 17, 2020)
+-----------------------------
+- Added BrainExtraction templates.
+- Removed NoCere templates.
+- Modified muse.sh.in to add the -B/--brainextraction option for BrainExtraction. Remove the -C/--noCere option
+
 .. _v3.0.5:
 
 Release 3.0.5 (Oct 8, 2019)
